@@ -33,7 +33,7 @@ app.post("/user", (req, res) => {
 });
 
 app.get("/users", (req, res) => {
-  log("info", "User list");
+  log("info", "User list1");
   res.status(200).json(users);
 });
 

@@ -1,0 +1,163 @@
+name: Backend Production CI/CD
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "backend/**"
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: my-backend
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+
+  # ------------------------
+  # 1. QUALITY GATES
+  # ------------------------
+  # quality:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Setup Node
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 18
+  #
+  #     - name: Install dependencies
+  #       run: |
+  #         cd backend
+  #         npm ci
+  #
+  #     - name: Lint
+  #       run: |
+  #         cd backend
+  #         npm run lint
+  #
+  #     - name: Unit Tests
+  #       run: |
+  #         cd backend
+  #         npm test -- --coverage
+  #
+  #     - name: Upload coverage
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: backend-coverage
+  #         path: backend/coverage/
+
+  # ------------------------
+  # 2. SECURITY SCAN
+  # ------------------------
+  security:
+    runs-on: ubuntu-latest
+    # needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          npm ci
+
+      - name: Dependency Vulnerability Scan
+        run: |
+          cd backend
+          npm audit --audit-level=high
+
+      # - name: Trivy FS Scan
+      #   uses: aquasecurity/trivy-action@master
+      #   with:
+      #     scan-type: fs
+      #     severity: CRITICAL,HIGH
+
+  # ------------------------
+  # 3. BUILD & PUSH DOCKER IMAGE
+  # ------------------------
+  build:
+    runs-on: ubuntu-latest
+    needs: security
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # - name: Assume Role using OIDC (Recommended)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      #     aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker Image
+        run: |
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG backend
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Push Docker Image
+        run: |
+          docker push \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+      # - name: Image Scan (ECR)
+      #   run: |
+      #     aws ecr start-image-scan \
+      #       --repository-name $ECR_REPOSITORY \
+      #       --image-id imageTag=$IMAGE_TAG
+
+  # ------------------------
+  # 4. DEPLOY TO ECS
+  # ------------------------
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Render ECS Task Definition
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: backend/ecs-task.json
+          container-name: backend
+          image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      - name: Deploy to ECS Service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          cluster: ${{ secrets.ECS_CLUSTER }}
+          service: ${{ secrets.ECS_SERVICE }}
+          task-definition: backend/ecs-task.json
+          wait-for-service-stability: true
+
+      # - name: Smoke Test
+      #   run: |
+      #     curl -f https://api.myapp.com/health
+
+  # ------------------------
+  # 5. POST-DEPLOY
+  # ------------------------
+  # notify:
+  #   runs-on: ubuntu-latest
+  #   needs: deploy
+  #   steps:
+  #     - name: Slack Notification
+  #       run: |
+  #         curl -X POST -H 'Content-type: application/json' \
+  #         --data '{"text":"🚀 Backend production deployment successful"}' \
+  #         ${{ secrets.SLACK_WEBHOOK_URL }}
